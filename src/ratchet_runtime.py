@@ -1,7 +1,7 @@
 """
 Ratchet Runtime — reference implementation of the execution-safety contract.
 
-Implements docs/CONTRACT.md v0.5.0-alpha.1:
+Implements docs/CONTRACT.md v0.5.0-alpha.2:
   G1 Ordering · G2 Exclusive write tenure · G3 Position integrity (conditional)
   G4 Verified completion · G5 Effect integrity · G6 State isolation and durability
   plus §10 Boundedness.
@@ -18,15 +18,18 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
+import re
 import threading
 import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
-__version__ = "0.5.0a1"
+__version__ = "0.5.0a2"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -42,6 +45,22 @@ class BudgetExceeded(RatchetError):
     """§10 — a declared cap was hit."""
 class CircuitOpen(RatchetError):
     """§10 — too many consecutive failures; requires explicit human reset."""
+
+
+class EffectState(str, Enum):
+    """What a target-system read-back established about an orphaned effect."""
+
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class Reconciliation:
+    """Tri-state recovery decision plus evidence for the normal postcondition."""
+
+    state: EffectState
+    result: Dict[str, Any] = field(default_factory=dict)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -108,7 +127,16 @@ class StateStore:
         atomic_write(self.p("completion.json"), json.dumps(payload, indent=2, sort_keys=True))
 
     def completion(self) -> Optional[dict]:
-        return read_json(self.p("completion.json"))
+        completion = read_json(self.p("completion.json"))
+        if completion is None:
+            return None
+        if (not isinstance(completion, dict)
+                or not isinstance(completion.get("completed_at"), str)
+                or not isinstance(completion.get("run_id"), str)
+                or not isinstance(completion.get("positions"), dict)
+                or not isinstance(completion.get("outcome"), dict)):
+            raise RatchetError("corrupt completion record: invalid schema")
+        return completion
 
     def positions(self) -> Dict[str, Any]:
         c = self.completion()
@@ -128,7 +156,7 @@ class LockRecord:
     run_id: str
     pid: int
     host: str
-    tenure: Optional[int]
+    tenure: int
     started_at: float      # epoch seconds, UTC — see the note below
     heartbeat_at: float
 
@@ -158,6 +186,12 @@ class Tenure:
 
     def __init__(self, store: StateStore, heartbeat_period: float = 1.0, ttl_multiple: float = 5.0,
                  clock_skew_allowance: float = CLOCK_SKEW_ALLOWANCE):
+        if heartbeat_period <= 0:
+            raise RatchetError("heartbeat_period must be greater than zero")
+        if ttl_multiple <= 0:
+            raise RatchetError("ttl_multiple must be greater than zero")
+        if clock_skew_allowance < 0:
+            raise RatchetError("clock_skew_allowance must not be negative")
         self.store = store
         self.heartbeat_period = heartbeat_period
         self.ttl = heartbeat_period * ttl_multiple
@@ -185,8 +219,15 @@ class Tenure:
 
     def _next_tenure_locked(self) -> int:
         """Allocate a unique fencing token while ``_guard`` is held."""
-        cur = read_json(self.counter_path) or {"tenure": 0}
-        nxt = int(cur["tenure"]) + 1
+        cur = read_json(self.counter_path)
+        if cur is None:
+            current = 0
+        elif (not isinstance(cur, dict) or type(cur.get("tenure")) is not int
+              or cur["tenure"] < 0):
+            raise RatchetError("corrupt fencing counter")
+        else:
+            current = cur["tenure"]
+        nxt = current + 1
         atomic_write(self.counter_path, json.dumps({"tenure": nxt}))
         return nxt
 
@@ -195,7 +236,25 @@ class Tenure:
 
     def _read(self) -> Optional[LockRecord]:
         d = read_json(self.path)
-        return LockRecord(**d) if d else None
+        if d is None:
+            return None
+        try:
+            rec = LockRecord(**d)
+        except (TypeError, ValueError) as e:
+            raise RatchetError(f"corrupt lock record: {e}") from e
+        valid = (
+            isinstance(rec.run_id, str) and bool(rec.run_id)
+            and type(rec.pid) is int
+            and isinstance(rec.host, str) and bool(rec.host)
+            and type(rec.tenure) is int and rec.tenure > 0
+            and isinstance(rec.started_at, (int, float)) and not isinstance(rec.started_at, bool)
+            and math.isfinite(rec.started_at)
+            and isinstance(rec.heartbeat_at, (int, float)) and not isinstance(rec.heartbeat_at, bool)
+            and math.isfinite(rec.heartbeat_at)
+        )
+        if not valid:
+            raise RatchetError("corrupt lock record: invalid field type or value")
+        return rec
 
     def acquire(self, run_id: str, on_break: Optional[Callable[[LockRecord], None]] = None) -> LockRecord:
         """Acquire or seize tenure as one serialized local-filesystem transaction."""
@@ -242,6 +301,9 @@ class Tenure:
                     self.heartbeat()
                 except TenureLost as e:
                     self._heartbeat_error = e
+                    return
+                except Exception as e:                              # fail closed on I/O/state errors
+                    self._heartbeat_error = TenureLost(f"heartbeat failed: {e!r}")
                     return
 
         self._heartbeat_thread = threading.Thread(
@@ -365,6 +427,9 @@ def _terminate_if_reachable(rec: LockRecord) -> bool:
 # Steps
 # ─────────────────────────────────────────────────────────────────────────────
 
+_STEP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+
+
 @dataclass
 class Step:
     name: str
@@ -384,15 +449,23 @@ class Step:
     at_most_once: bool = False
     """G5. A step that cannot be made idempotent is never automatically retried."""
 
-    reconcile: Optional[Callable[["RunContext", dict], bool]] = None
-    """G5. Given a recovered intent record, did the effect land? Used instead of blind re-run."""
+    reconcile: Optional[Callable[["RunContext", dict], Reconciliation]] = None
+    """G5. Classifies a recovered effect as present, absent, or unknown."""
 
     def __post_init__(self) -> None:
-        if not self.name:
-            raise RatchetError("step name must not be empty")
-        if self.postcondition is None:
+        if not isinstance(self.name, str) or not _STEP_NAME.fullmatch(self.name):
+            raise RatchetError(
+                "step name must be 1-128 characters using letters, digits, '.', '_' or '-'"
+            )
+        if not callable(self.invoke):
+            raise RatchetError(f"step {self.name} requires a callable invoke")
+        if not callable(self.postcondition):
             raise RatchetError(f"step {self.name} requires a runner-evaluated postcondition")
-        if self.side_effecting and self.idempotency_key is None:
+        if (not isinstance(self.depends_on, list)
+                or any(not isinstance(d, str) or not _STEP_NAME.fullmatch(d)
+                       for d in self.depends_on)):
+            raise RatchetError(f"step {self.name} has an invalid dependency declaration")
+        if self.side_effecting and not callable(self.idempotency_key):
             raise RatchetError(f"side-effecting step {self.name} requires an idempotency key")
         if self.at_most_once and not self.side_effecting:
             raise RatchetError(f"at_most_once step {self.name} must be side-effecting")
@@ -403,9 +476,11 @@ class Step:
 @dataclass
 class RunContext:
     run_id: str
-    store: StateStore
     positions: Dict[str, Any]
+    tenure_token: int
     scratch: Dict[str, Any] = field(default_factory=dict)
+    step_name: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -438,6 +513,12 @@ class Runner:
         self.store = store
         self.steps = steps
         self.budget = budget or Budget()
+        if self.budget.max_steps < 0:
+            raise RatchetError("max_steps must not be negative")
+        if self.budget.max_seconds <= 0:
+            raise RatchetError("max_seconds must be greater than zero")
+        if self.budget.max_consecutive_failures < 1:
+            raise RatchetError("max_consecutive_failures must be at least one")
         self.tenure = Tenure(store, heartbeat_period=heartbeat_period)
         _assert_dag(steps)
 
@@ -446,7 +527,15 @@ class Runner:
         return self.store.p("breaker.json")
 
     def _breaker(self) -> dict:
-        return read_json(self._breaker_path()) or {"consecutive_failures": 0, "open": False}
+        b = read_json(self._breaker_path())
+        if b is None:
+            return {"consecutive_failures": 0, "open": False}
+        if (not isinstance(b, dict)
+                or type(b.get("consecutive_failures")) is not int
+                or b["consecutive_failures"] < 0
+                or type(b.get("open")) is not bool):
+            raise RatchetError("corrupt circuit-breaker state")
+        return b
 
     def _record_run(self, ok: Optional[bool]) -> None:
         # A deliberate human-approval pause is neither success nor failure. In particular it
@@ -465,25 +554,107 @@ class Runner:
 
     def reset_breaker(self) -> None:
         """Explicit human reset — §10 requires the breaker not clear itself."""
-        atomic_write(self._breaker_path(), json.dumps({"consecutive_failures": 0, "open": False}))
+        with self.tenure._guard():
+            cur = self.tenure._read()
+            if cur is not None:
+                age = time.time() - cur.heartbeat_at
+                if age <= self.tenure.ttl + self.tenure.clock_skew_allowance:
+                    raise TenureUnavailable("cannot reset the breaker while a live run holds tenure")
+            atomic_write(
+                self._breaker_path(),
+                json.dumps({"consecutive_failures": 0, "open": False}),
+            )
 
     # -- intent records (G5) --------------------------------------------------
-    def _intent_path(self, run_id: str, step: str) -> str:
+    def _intent_path(self, step: str) -> str:
         return self.store.p("intents", f"{step}.json")
 
-    def _write_intent(self, ctx: RunContext, step: Step) -> None:
-        key = step.idempotency_key(ctx) if step.idempotency_key else None
-        atomic_write(self._intent_path(ctx.run_id, step.name),
+    def _write_intent(self, ctx: RunContext, step: Step, key: str) -> None:
+        atomic_write(self._intent_path(step.name),
                      json.dumps({"run_id": ctx.run_id, "step": step.name,
-                                 "idempotency_key": key, "at": _utc_now_iso()}))
+                                 "idempotency_key": key, "tenure": ctx.tenure_token,
+                                 "at": _utc_now_iso()}))
 
     def _clear_intent(self, ctx: RunContext, step: Step) -> None:
-        p = self._intent_path(ctx.run_id, step.name)
+        p = self._intent_path(step.name)
         if os.path.exists(p):
             os.unlink(p)
+            dfd = os.open(os.path.dirname(p), os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
 
     def _orphan_intent(self, step: Step) -> Optional[dict]:
-        return read_json(self._intent_path("", step.name))
+        intent = read_json(self._intent_path(step.name))
+        if intent is None:
+            return None
+        if (not isinstance(intent, dict)
+                or not isinstance(intent.get("run_id"), str)
+                or intent.get("step") != step.name
+                or not isinstance(intent.get("idempotency_key"), str)
+                or not intent["idempotency_key"].strip()
+                or type(intent.get("tenure")) is not int):
+            raise RatchetError(f"corrupt intent record for step {step.name}")
+        return intent
+
+    def _effect_key(self, ctx: RunContext, step: Step) -> str:
+        try:
+            key = step.idempotency_key(ctx) if step.idempotency_key else None
+        except Exception as e:
+            raise RatchetError(f"idempotency key for step {step.name} raised: {e!r}") from e
+        if not isinstance(key, str) or not key.strip():
+            raise RatchetError(f"side-effecting step {step.name} produced an empty idempotency key")
+        return key
+
+    def _postcondition(self, ctx: RunContext, step: Step, result: dict) -> tuple[bool, str]:
+        try:
+            held = step.postcondition(ctx, result)
+        except Exception as e:
+            return False, f"postcondition raised: {e!r}"
+        if type(held) is not bool:
+            return False, f"postcondition returned non-boolean value: {held!r}"
+        return held, "post-condition failed despite ok=true"
+
+    @staticmethod
+    def _result_error(result: Any) -> Optional[str]:
+        if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+            return "result must be a dict containing boolean 'ok'"
+        positions = result.get("positions", {})
+        if positions is None:
+            positions = {}
+        if (not isinstance(positions, dict)
+                or any(not isinstance(src, str) or not src for src in positions)):
+            return "positions must be a mapping with non-empty string source names"
+        degraded = result.get("degraded", [])
+        if degraded is None:
+            degraded = []
+        if (not isinstance(degraded, list)
+                or any(not isinstance(src, str) or not src for src in degraded)):
+            return "degraded must be a list of non-empty source names"
+        if "paused" in result and (
+                not isinstance(result["paused"], str) or not result["paused"].strip()):
+            return "paused must be a non-empty reason string when present"
+        try:
+            json.dumps({"positions": positions, "degraded": degraded}, allow_nan=False)
+        except (TypeError, ValueError) as e:
+            return f"result metadata must be finite JSON data: {e}"
+        return None
+
+    @staticmethod
+    def _apply_metadata(result: dict, pending_positions: Dict[str, Any],
+                        outcome: RunOutcome) -> None:
+        for src, pos in (result.get("positions") or {}).items():
+            pending_positions[src] = pos
+        outcome.degraded.extend(result.get("degraded") or [])
+
+    def _fail(self, outcome: RunOutcome, step: Step, reason: str,
+              state: Optional[str] = None) -> RunOutcome:
+        outcome.failed_step = step.name
+        outcome.reason = reason
+        if state:
+            outcome.steps[step.name] = state
+        return self._finish(outcome, ok=False)
 
     # -- run ------------------------------------------------------------------
     def run(self) -> RunOutcome:
@@ -496,12 +667,20 @@ class Runner:
         outcome = RunOutcome(run_id=run_id, completed=False)
         started = time.monotonic()
 
-        self.tenure.acquire(run_id, on_break=lambda rec: outcome.tenure_breaks.append(rec.run_id))
-        self.tenure.start_heartbeat()
-        ctx = RunContext(run_id=run_id, store=self.store, positions=self.store.positions())
-        pending_positions = dict(ctx.positions)
-
+        acquired = self.tenure.acquire(
+            run_id, on_break=lambda rec: outcome.tenure_breaks.append(rec.run_id))
         try:
+            # Everything after acquisition belongs inside the cleanup boundary. A corrupt
+            # completion file must not strand a live heartbeat and make the lock immortal.
+            self.tenure.start_heartbeat()
+            last_completion = self.store.completion()
+            ctx = RunContext(
+                run_id=run_id,
+                positions=dict(last_completion["positions"]) if last_completion else {},
+                tenure_token=acquired.tenure,
+            )
+            pending_positions = dict(ctx.positions)
+            resolved_intents: List[Step] = []
             done: set[str] = set()
             for i, step in enumerate(self.steps):
                 # §10 boundedness
@@ -513,40 +692,106 @@ class Runner:
                 # G1 ordering
                 missing = [d for d in step.depends_on if d not in done]
                 if missing:
-                    outcome.failed_step = step.name
-                    outcome.reason = f"unmet dependencies: {missing}"
-                    return self._finish(outcome, ok=False)
+                    return self._fail(outcome, step, f"unmet dependencies: {missing}")
 
                 self.tenure.heartbeat()
+                ctx.step_name = step.name
+                ctx.idempotency_key = None
+
+                effect_key: Optional[str] = None
+                if step.side_effecting:
+                    try:
+                        effect_key = self._effect_key(ctx, step)
+                    except RatchetError as e:
+                        return self._fail(outcome, step, str(e), "invalid-idempotency-key")
+                    ctx.idempotency_key = effect_key
 
                 # G5 — an orphan intent means a previous run may have landed the effect.
                 orphan = self._orphan_intent(step)
+                if (orphan and last_completion
+                        and orphan["run_id"] == last_completion["run_id"]):
+                    # Completion is authoritative. This intent survived only because cleanup
+                    # failed or the process died after the commit; it is safe to remove before
+                    # evaluating the next logical effect key.
+                    self.tenure.mutate(lambda: self._clear_intent(ctx, step))
+                    orphan = None
                 if orphan and orphan.get("run_id") != run_id:
-                    if step.reconcile and step.reconcile(ctx, orphan):
+                    if not step.side_effecting or effect_key is None:
+                        return self._fail(
+                            outcome, step, "orphan intent belongs to a non-side-effecting step")
+                    if orphan["idempotency_key"] != effect_key:
+                        return self._fail(
+                            outcome,
+                            step,
+                            "idempotency key changed while an orphan intent is unresolved",
+                            "idempotency-key-mismatch",
+                        )
+                    if step.reconcile is None:
+                        if step.at_most_once:
+                            return self._fail(
+                                outcome, step,
+                                "at_most_once step has an unresolved orphan intent")
+                        return self._fail(
+                            outcome, step, "orphan intent requires reconciliation before retry")
+                    try:
+                        recovery = step.reconcile(ctx, orphan)
+                    except Exception as e:
+                        return self._fail(
+                            outcome, step, f"reconciliation raised: {e!r}",
+                            "reconciliation-error")
+
+                    self.tenure.assert_held()
+                    if time.monotonic() - started > self.budget.max_seconds:
+                        raise BudgetExceeded(f"max_seconds={self.budget.max_seconds}")
+                    if (not isinstance(recovery, Reconciliation)
+                            or not isinstance(recovery.state, EffectState)
+                            or not isinstance(recovery.result, dict)):
+                        return self._fail(
+                            outcome, step,
+                            "reconciliation must return Reconciliation with a tri-state effect",
+                            "reconciliation-invalid")
+                    if recovery.state is EffectState.UNKNOWN:
+                        return self._fail(
+                            outcome, step, "external effect remains ambiguous; human review required",
+                            "reconciliation-unknown")
+                    if recovery.state is EffectState.PRESENT:
+                        recovered_result = dict(recovery.result)
+                        recovered_result["ok"] = True
+                        recovered_result["reconciled"] = True
+                        error = self._result_error(recovered_result)
+                        if error or "paused" in recovered_result:
+                            return self._fail(
+                                outcome, step,
+                                f"invalid reconciled result: {error or 'pause is not recoverable evidence'}",
+                                "reconciliation-invalid")
+                        held, reason = self._postcondition(ctx, step, recovered_result)
+                        if not held:
+                            return self._fail(
+                                outcome, step, reason, "reconciled-postcondition-failed")
+                        if time.monotonic() - started > self.budget.max_seconds:
+                            raise BudgetExceeded(f"max_seconds={self.budget.max_seconds}")
+                        self._apply_metadata(recovered_result, pending_positions, outcome)
                         outcome.reconciled.append(step.name)
                         outcome.steps[step.name] = "reconciled"
                         done.add(step.name)
-                        self.tenure.mutate(lambda: self._clear_intent(ctx, step))
+                        resolved_intents.append(step)
                         continue
                     if step.at_most_once:
-                        outcome.failed_step = step.name
-                        outcome.reason = "at_most_once step has an unreconciled orphan intent"
-                        return self._finish(outcome, ok=False)
-                    if step.reconcile is None:
-                        outcome.failed_step = step.name
-                        outcome.reason = "orphan intent requires reconciliation before retry"
-                        return self._finish(outcome, ok=False)
+                        return self._fail(
+                            outcome, step,
+                            "at_most_once step has an unresolved orphan intent")
+                    # ABSENT is the only state that reaches retry, and the key comparison
+                    # above proves the retry uses the same logical operation identity.
 
                 if step.side_effecting:
-                    self.tenure.mutate(lambda: self._write_intent(ctx, step))
+                    assert effect_key is not None
+                    self.tenure.mutate(lambda: self._write_intent(ctx, step, effect_key))
 
                 # Invoke. The result is INPUT to the decision, never the decision (§9).
                 try:
                     result = step.invoke(ctx)
                 except Exception as e:
-                    outcome.failed_step = step.name
-                    outcome.reason = f"step raised: {e!r}"
-                    return self._finish(outcome, ok=False)
+                    return self._fail(outcome, step, f"step raised: {e!r}")
 
                 # A background heartbeat may have discovered seizure while the step ran.
                 # Revalidate before accepting any result or changing runner state.
@@ -554,45 +799,48 @@ class Runner:
                 if time.monotonic() - started > self.budget.max_seconds:
                     raise BudgetExceeded(f"max_seconds={self.budget.max_seconds}")
 
-                if not isinstance(result, dict) or "ok" not in result:
-                    outcome.failed_step = step.name
-                    outcome.reason = "invalid step result (ambiguity is failure)"
-                    return self._finish(outcome, ok=False)
+                error = self._result_error(result)
+                if error:
+                    return self._fail(
+                        outcome, step, f"invalid step result: {error}", "invalid-result")
 
-                if not result.get("ok"):
-                    outcome.failed_step = step.name
-                    outcome.reason = f"step reported failure: {result.get('diagnostics')}"
-                    return self._finish(outcome, ok=False)
+                if result["ok"] is not True:
+                    return self._fail(
+                        outcome, step,
+                        f"step reported failure: {result.get('diagnostics')}")
 
                 # G4 — the agent's report is necessary, never sufficient.
-                try:
-                    held = bool(step.postcondition(ctx, result))
-                except Exception as e:
-                    held = False
-                    result.setdefault("diagnostics", []).append(f"postcondition raised: {e!r}")
+                held, reason = self._postcondition(ctx, step, result)
                 if not held:
-                    outcome.failed_step = step.name
-                    outcome.reason = "post-condition failed despite ok=true"
-                    outcome.steps[step.name] = "postcondition-failed"
-                    return self._finish(outcome, ok=False)
+                    return self._fail(outcome, step, reason, "postcondition-failed")
+                if time.monotonic() - started > self.budget.max_seconds:
+                    raise BudgetExceeded(f"max_seconds={self.budget.max_seconds}")
 
                 # A workflow may deliberately stop for human approval. Pending positions stay
                 # uncommitted, no completion marker is written, and the circuit breaker is
                 # unchanged. The step's post-condition still ran above, so `paused` cannot be
                 # used to bypass verification of the pause artifact itself.
-                if result.get("paused"):
-                    self.tenure.mutate(lambda: self._clear_intent(ctx, step))
+                if "paused" in result:
+                    if step.side_effecting:
+                        return self._fail(
+                            outcome,
+                            step,
+                            "a side-effecting step cannot pause after invocation; intent retained",
+                            "unsafe-pause",
+                        )
                     outcome.steps[step.name] = "paused"
                     outcome.paused_at = step.name
-                    outcome.reason = str(result.get("paused"))
+                    outcome.reason = result["paused"]
                     return self._finish(outcome, ok=None)
 
                 # G3 — positions are held PENDING; committed only at verified completion.
-                for src, pos in (result.get("positions") or {}).items():
-                    pending_positions[src] = pos
-                outcome.degraded.extend(result.get("degraded") or [])
+                self._apply_metadata(result, pending_positions, outcome)
 
-                self.tenure.mutate(lambda: self._clear_intent(ctx, step))
+                if step.side_effecting:
+                    # Keep the intent until the WHOLE workflow commits. Clearing it here would
+                    # lose recovery evidence if a later step failed or the process died before
+                    # completion.json became durable.
+                    resolved_intents.append(step)
                 outcome.steps[step.name] = "ok"
                 done.add(step.name)
 
@@ -603,6 +851,13 @@ class Runner:
                 self.store.commit_completion(run_id, pending_positions, _outcome_dict(outcome))
                 self._record_run(True)
                 self._write_run_record(outcome)
+                for resolved in resolved_intents:
+                    try:
+                        self._clear_intent(ctx, resolved)
+                    except OSError:
+                        # The durable completion record makes this cleanup residue recognizable
+                        # and safe to remove at the start of the next run.
+                        pass
 
             self.tenure.mutate(commit_success)
             return outcome

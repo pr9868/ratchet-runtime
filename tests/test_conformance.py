@@ -1,7 +1,7 @@
 """
 Ratchet Runtime conformance suite.
 
-Every guarantee in docs/CONTRACT.md v0.5.0-alpha.1, asserted WITHOUT invoking an agent.
+Every guarantee in docs/CONTRACT.md v0.5.0-alpha.2, asserted WITHOUT invoking an agent.
 That property is the point: if a guarantee needed an LLM to test, it would not be a
 guarantee — it would be a hope.
 
@@ -17,8 +17,9 @@ import traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from ratchet_runtime import (  # noqa: E402
-    Budget, CircuitOpen, RatchetError, Runner, StateStore, Step as RuntimeStep, Tenure,
-    TenureLost, TenureUnavailable, atomic_write, read_json, staleness_check,
+    Budget, CircuitOpen, EffectState, RatchetError, Reconciliation, Runner, StateStore,
+    Step as RuntimeStep, Tenure, TenureLost, TenureUnavailable, atomic_write, read_json,
+    staleness_check,
 )
 
 RESULTS = []
@@ -299,10 +300,11 @@ def _():
     # This is the finding that made v0.1's G4 false. The agent lies (or is simply
     # wrong); the runner checks the effect itself and refuses completion.
     store = tmpstore()
+    artifact = store.p("artifact.txt")
     steps = [Step(
         "writes-a-file",
         invoke=lambda c: ok(note="I definitely wrote it"),   # agent self-reports success
-        postcondition=lambda c, r: os.path.exists(c.store.p("artifact.txt")),  # it did not
+        postcondition=lambda c, r: os.path.exists(artifact),  # it did not
     )]
     out = Runner(store, steps).run()
     assert not out.completed, "agent self-report was accepted as sufficient"
@@ -313,13 +315,14 @@ def _():
 @test("G4: a passing post-condition completes")
 def _():
     store = tmpstore()
+    artifact = store.p("artifact.txt")
 
     def do(c):
-        atomic_write(c.store.p("artifact.txt"), "content")
+        atomic_write(artifact, "content")
         return ok()
 
     steps = [Step("writes-a-file", invoke=do,
-                  postcondition=lambda c, r: os.path.exists(c.store.p("artifact.txt")))]
+                  postcondition=lambda c, r: os.path.exists(artifact))]
     out = Runner(store, steps).run()
     assert out.completed, out.reason
     assert store.completion() is not None
@@ -357,8 +360,7 @@ def _():
     steps = [
         Step("preview", invoke=lambda c: {
             "ok": True, "paused": "approval_pending", "positions": {"src": "p1"}},
-            postcondition=lambda c, r: (ran.append("verified"), True)[1],
-            side_effecting=True),
+            postcondition=lambda c, r: (ran.append("verified"), True)[1]),
         Step("after", invoke=lambda c: (ran.append("after"), ok())[1],
              depends_on=["preview"]),
     ]
@@ -421,9 +423,10 @@ def _():
 @test("G5: a crashed step leaves an intent record")
 def _():
     store = tmpstore()
+    external = store.p("external.txt")
 
     def crash(c):
-        atomic_write(c.store.p("external.txt"), "written")   # external effect lands
+        atomic_write(external, "written")   # external effect lands
         raise RuntimeError("died before reporting")
 
     Runner(store, [Step("w", invoke=crash, side_effecting=True,
@@ -464,18 +467,20 @@ def _():
 def _():
     store = tmpstore()
     calls = []
+    external = store.p("external.txt")
 
     def crash(c):
-        atomic_write(c.store.p("external.txt"), "written once")
+        atomic_write(external, "written once")
         raise RuntimeError("died before reporting")
 
     def do(c):
         calls.append("ran")
-        atomic_write(c.store.p("external.txt"), "written twice")
+        atomic_write(external, "written twice")
         return ok()
 
     key = lambda c: "key-1"                                    # noqa: E731
-    recon = lambda c, intent: os.path.exists(c.store.p("external.txt"))  # noqa: E731
+    recon = lambda c, intent: Reconciliation(                    # noqa: E731
+        EffectState.PRESENT if os.path.exists(external) else EffectState.ABSENT)
 
     Runner(store, [Step("w", invoke=crash, side_effecting=True, idempotency_key=key)]).run()
     out = Runner(store, [Step("w", invoke=do, side_effecting=True,
@@ -483,7 +488,7 @@ def _():
     assert out.completed, out.reason
     assert calls == [], "step re-ran despite the effect having landed — duplicate write"
     assert "w" in out.reconciled
-    assert open(store.p("external.txt")).read() == "written once"
+    assert open(external).read() == "written once"
 
 
 @test("G5: an at_most_once step with an unreconciled orphan FAILS rather than retrying")
@@ -792,6 +797,314 @@ def _():
     r.tenure.release = lambda: (_ for _ in ()).throw(OSError("release exploded"))
     out = r.run()
     assert out.completed, "cleanup housekeeping must not turn a good run into a crash"
+
+
+@test("G1/G6: a step name cannot escape the intent directory")
+def _():
+    for bad in ["../completion", "nested/step", "", "."]:
+        try:
+            RuntimeStep(bad, invoke=lambda _ctx: ok(),
+                        postcondition=lambda _ctx, _result: True)
+            raise AssertionError(f"unsafe step name was accepted: {bad!r}")
+        except RatchetError:
+            pass
+
+
+@test("G2/G5: callbacks receive the fencing token and evaluated effect key, not the state store")
+def _():
+    store = tmpstore()
+    observed = {}
+
+    def invoke(ctx):
+        observed.update(token=ctx.tenure_token, key=ctx.idempotency_key,
+                        step=ctx.step_name, has_store=hasattr(ctx, "store"))
+        return ok()
+
+    out = Runner(store, [Step(
+        "publish", invoke=invoke, side_effecting=True,
+        idempotency_key=lambda _ctx: "publish:42",
+    )]).run()
+    assert out.completed
+    assert observed == {"token": 1, "key": "publish:42", "step": "publish",
+                        "has_store": False}
+
+
+@test("G2: a failure after acquisition still stops heartbeat and releases tenure")
+def _():
+    store = tmpstore()
+    atomic_write(store.p("completion.json"), "}{ corrupt")
+    runner = Runner(store, [Step("s", invoke=lambda _ctx: ok())], heartbeat_period=0.01)
+    try:
+        runner.run()
+        raise AssertionError("corrupt completion was accepted")
+    except RatchetError:
+        pass
+    assert runner.tenure._heartbeat_thread is None
+    successor = Tenure(store, heartbeat_period=60)
+    successor.acquire("successor")
+    successor.release()
+
+
+@test("G2: an unexpected heartbeat error fails closed without persistent outcome writes")
+def _():
+    store = tmpstore()
+    runner = Runner(
+        store,
+        [Step("slow", invoke=lambda _ctx: (time.sleep(0.04), ok())[1])],
+        heartbeat_period=0.005,
+    )
+    real_heartbeat = runner.tenure.heartbeat
+    calls = []
+
+    def flaky_heartbeat():
+        calls.append("beat")
+        if len(calls) > 1:
+            raise OSError("simulated heartbeat I/O failure")
+        real_heartbeat()
+
+    runner.tenure.heartbeat = flaky_heartbeat
+    out = runner.run()
+    assert not out.completed and "tenure lost" in (out.reason or "")
+    assert store.completion() is None
+    assert read_json(store.p("breaker.json")) is None
+    assert read_json(store.p("runs", f"{out.run_id}.json")) is None
+
+
+@test("§10: breaker reset is rejected while a live run owns tenure")
+def _():
+    store = tmpstore()
+    owner = Tenure(store, heartbeat_period=60)
+    owner.acquire("owner")
+    try:
+        Runner(store, [Step("s", invoke=lambda _ctx: ok())]).reset_breaker()
+        raise AssertionError("breaker reset raced a live run")
+    except TenureUnavailable:
+        pass
+    finally:
+        owner.release()
+
+
+@test("G4: a non-boolean postcondition is ambiguity and therefore failure")
+def _():
+    store = tmpstore()
+    out = Runner(store, [Step(
+        "s", invoke=lambda _ctx: ok(),
+        postcondition=lambda _ctx, _result: "yes",
+    )]).run()
+    assert not out.completed
+    assert "non-boolean" in (out.reason or "")
+
+
+@test("G4/G3: malformed result metadata fails with an owned run record")
+def _():
+    bad_results = [
+        {"ok": "yes"},
+        {"ok": True, "positions": []},
+        {"ok": True, "degraded": "source-a"},
+        {"ok": True, "positions": {"source-a": float("nan")}},
+        {"ok": True, "paused": True},
+    ]
+    for bad in bad_results:
+        store = tmpstore()
+        out = Runner(store, [Step("s", invoke=lambda _ctx, value=bad: value)]).run()
+        assert not out.completed, bad
+        assert "invalid step result" in (out.reason or "")
+        assert read_json(store.p("runs", f"{out.run_id}.json")) is not None
+
+
+@test("G4/G5: a reconciled effect must still pass the normal postcondition")
+def _():
+    store = tmpstore()
+    calls = []
+    key = lambda _ctx: "publish:1"  # noqa: E731
+    Runner(store, [Step(
+        "publish",
+        invoke=lambda _ctx: (_ for _ in ()).throw(RuntimeError("after effect")),
+        side_effecting=True,
+        idempotency_key=key,
+    )]).run()
+    out = Runner(store, [Step(
+        "publish",
+        invoke=lambda _ctx: (calls.append("invoked"), ok())[1],
+        side_effecting=True,
+        idempotency_key=key,
+        reconcile=lambda _ctx, _intent: Reconciliation(EffectState.PRESENT),
+        postcondition=lambda _ctx, _result: False,
+    )]).run()
+    assert not out.completed and calls == []
+    assert out.steps["publish"] == "reconciled-postcondition-failed"
+    assert read_json(store.p("intents", "publish.json")) is not None
+
+
+@test("G5: a key callback must return a non-empty string before invocation")
+def _():
+    store = tmpstore()
+    calls = []
+    out = Runner(store, [Step(
+        "publish", invoke=lambda _ctx: (calls.append("invoked"), ok())[1],
+        side_effecting=True, idempotency_key=lambda _ctx: "",
+    )]).run()
+    assert not out.completed and calls == []
+    assert "empty idempotency key" in (out.reason or "")
+    assert read_json(store.p("intents", "publish.json")) is None
+
+
+@test("G5: an unresolved intent blocks a changed idempotency key")
+def _():
+    store = tmpstore()
+    Runner(store, [Step(
+        "publish", invoke=lambda _ctx: (_ for _ in ()).throw(RuntimeError("crash")),
+        side_effecting=True, idempotency_key=lambda _ctx: "old-key",
+    )]).run()
+    calls = []
+    out = Runner(store, [Step(
+        "publish", invoke=lambda _ctx: (calls.append("invoke"), ok())[1],
+        side_effecting=True, idempotency_key=lambda _ctx: "new-key",
+        reconcile=lambda _ctx, _intent: (calls.append("reconcile"),
+                                           Reconciliation(EffectState.ABSENT))[1],
+    )]).run()
+    assert not out.completed and calls == []
+    assert out.steps["publish"] == "idempotency-key-mismatch"
+    assert read_json(store.p("intents", "publish.json"))["idempotency_key"] == "old-key"
+
+
+@test("G5: unknown reconciliation stops instead of being treated as absence")
+def _():
+    store = tmpstore()
+    key = lambda _ctx: "stable-key"  # noqa: E731
+    Runner(store, [Step(
+        "publish", invoke=lambda _ctx: (_ for _ in ()).throw(RuntimeError("crash")),
+        side_effecting=True, idempotency_key=key,
+    )]).run()
+    calls = []
+    out = Runner(store, [Step(
+        "publish", invoke=lambda _ctx: (calls.append("invoke"), ok())[1],
+        side_effecting=True, idempotency_key=key,
+        reconcile=lambda _ctx, _intent: Reconciliation(EffectState.UNKNOWN),
+    )]).run()
+    assert not out.completed and calls == []
+    assert out.steps["publish"] == "reconciliation-unknown"
+    assert read_json(store.p("intents", "publish.json")) is not None
+
+
+@test("G5: confirmed absence retries through the original key")
+def _():
+    store = tmpstore()
+    key = lambda _ctx: "stable-key"  # noqa: E731
+    Runner(store, [Step(
+        "publish", invoke=lambda _ctx: (_ for _ in ()).throw(RuntimeError("before effect")),
+        side_effecting=True, idempotency_key=key,
+    )]).run()
+    observed = []
+
+    def retry(ctx):
+        observed.append(ctx.idempotency_key)
+        return ok()
+
+    out = Runner(store, [Step(
+        "publish", invoke=retry, side_effecting=True, idempotency_key=key,
+        reconcile=lambda _ctx, _intent: Reconciliation(EffectState.ABSENT),
+    )]).run()
+    assert out.completed and observed == ["stable-key"]
+    assert read_json(store.p("intents", "publish.json")) is None
+
+
+@test("G5: a side-effecting pause is a failure and retains its intent")
+def _():
+    store = tmpstore()
+    out = Runner(store, [Step(
+        "publish", invoke=lambda _ctx: {"ok": True, "paused": "approve"},
+        side_effecting=True, idempotency_key=lambda _ctx: "publish:pause",
+    )]).run()
+    assert not out.completed and out.steps["publish"] == "unsafe-pause"
+    assert read_json(store.p("intents", "publish.json")) is not None
+    assert store.completion() is None
+
+
+@test("G5: a verified effect keeps its intent when a later step fails")
+def _():
+    store = tmpstore()
+    external = store.p("external.txt")
+    key = lambda _ctx: "publish:one"  # noqa: E731
+
+    first = Runner(store, [
+        Step(
+            "publish",
+            invoke=lambda _ctx: (atomic_write(external, "once"), ok())[1],
+            side_effecting=True,
+            idempotency_key=key,
+            postcondition=lambda _ctx, _result: os.path.exists(external),
+        ),
+        Step("later", invoke=lambda _ctx: {"ok": False}, depends_on=["publish"]),
+    ]).run()
+    assert not first.completed
+    assert read_json(store.p("intents", "publish.json")) is not None
+
+    calls = []
+    second = Runner(store, [
+        Step(
+            "publish",
+            invoke=lambda _ctx: (calls.append("duplicate"), ok())[1],
+            side_effecting=True,
+            idempotency_key=key,
+            reconcile=lambda _ctx, _intent: Reconciliation(EffectState.PRESENT),
+            postcondition=lambda _ctx, _result: os.path.exists(external),
+        ),
+        Step("later", invoke=lambda _ctx: ok(), depends_on=["publish"]),
+    ]).run()
+    assert second.completed and calls == []
+    assert open(external).read() == "once"
+
+
+@test("G5: an intent left after durable completion is cleanup residue")
+def _():
+    store = tmpstore()
+    first_runner = Runner(store, [Step(
+        "publish", invoke=lambda _ctx: ok(), side_effecting=True,
+        idempotency_key=lambda _ctx: "publish:old",
+    )])
+    first_runner._clear_intent = lambda _ctx, _step: None
+    first = first_runner.run()
+    intent = read_json(store.p("intents", "publish.json"))
+    assert first.completed and intent["run_id"] == first.run_id
+
+    calls = []
+    second = Runner(store, [Step(
+        "publish", invoke=lambda _ctx: (calls.append("new-effect"), ok())[1],
+        side_effecting=True, idempotency_key=lambda _ctx: "publish:new",
+    )]).run()
+    assert second.completed and calls == ["new-effect"]
+    assert read_json(store.p("intents", "publish.json")) is None
+
+
+@test("G6: structurally invalid lock JSON is a seizable corrupt lock")
+def _():
+    store = tmpstore()
+    atomic_write(store.p("lock.json"), '{"run_id":"missing-fields"}')
+    tenure = Tenure(store, heartbeat_period=60)
+    rec = tenure.acquire("successor")
+    assert rec.run_id == "successor"
+    assert any("corrupt" in item for item in tenure.breaks)
+    tenure.release()
+
+
+@test("configuration: invalid lease and budget values are rejected early")
+def _():
+    store = tmpstore()
+    bad_factories = [
+        lambda: Tenure(store, heartbeat_period=0),
+        lambda: Tenure(store, ttl_multiple=0),
+        lambda: Tenure(store, clock_skew_allowance=-1),
+        lambda: Runner(store, [], budget=Budget(max_steps=-1)),
+        lambda: Runner(store, [], budget=Budget(max_seconds=0)),
+        lambda: Runner(store, [], budget=Budget(max_consecutive_failures=0)),
+    ]
+    for build in bad_factories:
+        try:
+            build()
+            raise AssertionError("invalid configuration was accepted")
+        except RatchetError:
+            pass
 
 
 if __name__ == "__main__":

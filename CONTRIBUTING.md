@@ -8,7 +8,11 @@ Before opening a change:
 ```bash
 python3 -B tests/test_conformance.py
 python3 -m build
+python3 examples/effect_recovery.py
 ```
+
+The `build` command requires the standard PyPA `build` frontend. If it is not installed, verify the
+same local setuptools package path with `python3 -m pip wheel . --no-deps --no-build-isolation`.
 
 Behavior changes must update the implementation, contract, tests, README status, and changelog
 together. A weakened guarantee is a contract change, not an implementation detail.

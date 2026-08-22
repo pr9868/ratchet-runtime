@@ -17,8 +17,8 @@ judge. It owns the mechanics that must remain true when an agent is confidently 
 | **G2 Exclusive runner tenure** | One run owns runner state; fencing tokens increase on every acquisition |
 | **G3 Position integrity** | Source positions advance only with verified completion |
 | **G4 Verified completion** | Every step has a runner-evaluated postcondition; `ok: true` is not sufficient |
-| **G5 Effect integrity** | Side effects have idempotency keys, intent records, and reconciliation before retry |
-| **G6 State integrity** | Completion, positions, intents, outcomes, and tenure are durable and atomically published |
+| **G5 Effect integrity** | Side effects have validated idempotency keys, intent records, and tri-state reconciliation before retry |
+| **G6 State integrity** | State files are durably replaced; completion, positions, and outcome share one atomic record |
 
 The implementation also provides cooperative run budgets, a circuit breaker, deliberate pause
 semantics, and a staleness check intended to run from a separate watchdog process.
@@ -42,27 +42,39 @@ idempotency key.
 from pathlib import Path
 from ratchet_runtime import Runner, StateStore, Step
 
-workspace = Path("work")
-workspace.mkdir(exist_ok=True)
+source = Path("source.txt")
+source.write_text("alpha\nbeta\n")
 
-def write_report(_ctx):
-    (workspace / "report.md").write_text("verified output\n")
-    return {"ok": True, "positions": {"source-a": "cursor-42"}}
+def count_lines(_ctx):
+    return {"ok": True, "line_count": len(source.read_text().splitlines())}
 
-steps = [
-    Step(
-        "write-report",
-        invoke=write_report,
-        postcondition=lambda _ctx, _result: (workspace / "report.md").exists(),
-    )
-]
+steps = [Step(
+    "count-lines",
+    invoke=count_lines,
+    # Re-read the source instead of accepting the step's count as truth.
+    postcondition=lambda _ctx, result: (
+        result["line_count"] == len(source.read_text().splitlines())
+    ),
+)]
 
 outcome = Runner(StateStore(".ratchet-state"), steps).run()
 assert outcome.completed
 ```
 
-For an external write, add `side_effecting=True`, an `idempotency_key`, and a `reconcile` callback
-that can read the target system after an interrupted run. See the effect lifecycle in
+Use one state root per workflow. Step names are safe identifiers rather than paths. `RunContext`
+exposes the current `tenure_token` and the runtime-evaluated `idempotency_key`; it deliberately does
+not expose the state store.
+
+For an external write, add `side_effecting=True`, a stable `idempotency_key`, and a tri-state
+`reconcile` callback that can return `PRESENT`, `ABSENT`, or `UNKNOWN` after an interrupted run. The
+complete example simulates a crash after a target write and proves the next run does not duplicate
+it:
+
+```bash
+python3 examples/effect_recovery.py
+```
+
+See [`examples/effect_recovery.py`](examples/effect_recovery.py) and the effect lifecycle in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Why the guard exists
@@ -74,12 +86,13 @@ token, and publishing ownership happen in one local-filesystem critical section.
 wraps every runner-state mutation.
 
 The conformance suite also verifies that losing tenure produces no breaker or run-record write,
-that a background heartbeat stays live during a long step, and that a missing postcondition or
-idempotency key is rejected at construction.
+that a background heartbeat stays live during a long step, and that missing postconditions, empty
+effect keys, key drift, ambiguous reconciliation, malformed results, and unsafe side-effect pauses
+fail closed.
 
 ## Status and limits
 
-**v0.5.0a1: public alpha, 46/46 conformance checks passing.**
+**v0.5.0a2: public alpha, 63/63 conformance checks passing.**
 
 The checks establish the contract on a local POSIX filesystem. They do not establish:
 
@@ -99,7 +112,9 @@ cannot manufacture either protection inside a Python callback.
 
 1. [`docs/CONTRACT.md`](docs/CONTRACT.md) — the exact guarantees and deployment obligations.
 2. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the state boundary and effect lifecycle.
-3. [`docs/REVIEW-001.md`](docs/REVIEW-001.md) — what the first design and first green suite got wrong.
-4. [`tests/test_conformance.py`](tests/test_conformance.py) — executable evidence for the claims.
+3. [`docs/ADR-001.md`](docs/ADR-001.md) — why the reference coordinator is local POSIX `flock`.
+4. [`docs/REVIEW-001.md`](docs/REVIEW-001.md) — what the first design and first green suite got wrong.
+5. [`docs/REVIEW-002.md`](docs/REVIEW-002.md) — the release-candidate adversarial review.
+6. [`tests/test_conformance.py`](tests/test_conformance.py) — executable evidence for the claims.
 
 Ratchet Runtime is licensed under the [MIT License](LICENSE).

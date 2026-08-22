@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0a2 — 2026-08-21
+
+Release-candidate adversarial corrections.
+
+- Replaced boolean recovery with explicit `PRESENT`, `ABSENT`, and `UNKNOWN` reconciliation.
+- Required recovered effects to pass the normal runner postcondition.
+- Blocked key drift across orphan recovery and validated effect keys before invocation.
+- Retained intents when a side-effecting step attempts to pause.
+- Retained resolved intents until workflow completion so later failures cannot erase recovery
+  evidence, with self-healing cleanup residue after a durable commit.
+- Restricted step names to safe identifiers and removed `StateStore` from callback context.
+- Exposed the evaluated idempotency key and fencing token to callbacks.
+- Moved all post-acquisition setup under cleanup and made heartbeat errors fail closed.
+- Added strict result schemas, structural lock validation, coordinated breaker reset, and early
+  configuration validation.
+- Added the executable crash-after-effect example, a local-coordinator ADR, Review 002, and seventeen
+  adversarial checks; 63/63 checks pass.
+
 ## 0.5.0a1 — 2026-08-21
 
 First public alpha.
