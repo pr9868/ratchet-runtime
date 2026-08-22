@@ -2,6 +2,11 @@
 
 **Execution safety for unattended agent workflows.**
 
+> [!IMPORTANT]
+> Ratchet Runtime is an educational reference implementation and experimental alpha. It is intended
+> for learning, design exploration, and local experiments—not production, distributed,
+> safety-critical, or untrusted-agent workloads.
+
 An agent can choose how to perform a step. It should not decide whether that step ran, whether an
 external effect is safe to repeat, or whether a run deserves a completion marker. Ratchet Runtime
 makes those decisions in deterministic Python.
