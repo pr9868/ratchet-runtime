@@ -1,0 +1,54 @@
+{
+  "date": "2026-09-29",
+  "note": "Owner-authorized public extraction. Generic source and synthetic tests only; no application state. Paths identify local source lineage, not runtime dependencies.",
+  "files": [
+    {
+      "source": "tracker-framework-v2/contracts/src/tracker_v2_contracts/models.py",
+      "sha256": "fd09d926c4f55ec7466842f9b3673a73c8d1013725f296bdfb72fd961a47ac79"
+    },
+    {
+      "source": "tracker-framework-v2/contracts/src/tracker_v2_contracts/canonical.py",
+      "sha256": "bffe2cb1df3a38f7c62f60a84f7f08739441ed95e1b1973b546c5856e8307956"
+    },
+    {
+      "source": "tracker-framework-v2/contracts/src/tracker_v2_contracts/validation.py",
+      "sha256": "c59d23c7201db83a89ed5737243e489a450f306c60ba3a960b3a94b1cf33e4be"
+    },
+    {
+      "source": "tracker-framework-v2/packages/ratchet/src/tracker_v2_ratchet/backend.py",
+      "sha256": "21be84190861d4f9b986428f345e5be7f9aa212ab5d678f6e1ea611f6f7b8008"
+    },
+    {
+      "source": "tracker-framework-v2/packages/ratchet/src/tracker_v2_ratchet/models.py",
+      "sha256": "54e9d272fe9816445ae81f7b17762ae315253c15640f54fb5e565847bb587a91"
+    },
+    {
+      "source": "tracker-framework-v2/packages/ratchet/src/tracker_v2_ratchet/__init__.py",
+      "sha256": "e77e1d80160844fa0670ffb8c497b0aa22edd7f68424909ccd6a86e35a5c9739"
+    },
+    {
+      "source": "tracker-framework-v2/packages/ratchet/src/tracker_v2_ratchet/errors.py",
+      "sha256": "b2c188cf46279cd1f6d5c0474bdb24e58e264cf92e83c63d4224d9471a853a6e"
+    },
+    {
+      "source": "tracker-framework-v2/packages/ratchet/src/tracker_v2_ratchet/tiers.py",
+      "sha256": "839d4b0fa6affcc6512a74eae2328a819a441f53edb18ee53a6de0c442894bd3"
+    },
+    {
+      "source": "tracker-framework-v2/packages/ratchet/src/tracker_v2_ratchet/comparators.py",
+      "sha256": "1a341ed3d3e156c45dfc785c50885bbf36927352cb19d236dfe4358a5a3f8b4f"
+    },
+    {
+      "source": "tracker-framework-v2/packages/ratchet/tests/test_crash_recovery.py",
+      "sha256": "9b8b89d5898c0736bb98e5e096b3d993c5936f5471019ad53b86b7856faad615"
+    },
+    {
+      "source": "tracker-framework-v2/packages/ratchet/tests/test_ratchet.py",
+      "sha256": "27d7f2de0b0faa7e1018f18e0250c563a70e3343c138c382d42e2705e8bf23d5"
+    },
+    {
+      "source": "tracker-framework-v2/packages/ratchet/tests/test_multiprocess_fencing.py",
+      "sha256": "f381fe4bae56b45e337d0a7b908ec5286fb209f901e193753be164d0682e225c"
+    }
+  ]
+}

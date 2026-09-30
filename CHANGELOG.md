@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0a1 — 2026-09-29 (local candidate)
+
+- Added the domain-neutral `ratchet_sqlite` API: transactional leases and fencing,
+  immutable attempts, monotonic positions, checkpoints, effect recovery, atomic
+  snapshot activation, and chained commit certificates.
+- Added inspection that does not write to the source database or its sidecars.
+- Extracted generic typed contracts; no Tracker runtime, provider, or knowledge dependency.
+- Preserved the legacy Runner/StateStore API and its state format.
+- Reject failed/gated/abandoned commits and outcome or verification-policy drift on replay.
+- Canonical serialization rejects non-string mapping keys instead of silently colliding them.
+- Carried forward synthetic component, SIGKILL recovery, and multiprocess tests; added
+  public-boundary regressions and installation smoke checks.
+- **Compatibility:** the distribution now requires Python 3.11+. SQLite is a separate API
+  and store; there is no automatic migration from file-backed or other application state.
+
 ## 0.5.0a2 — 2026-08-21
 
 Release-candidate adversarial corrections.

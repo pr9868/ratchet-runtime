@@ -12,3 +12,7 @@ contract for unattended agent workflows.
   synchronized when behavior changes.
 - Keep examples and documentation free of private paths, credentials, internal identifiers, and
   consumer-specific integration details.
+
+- For 0.6 changes also run `python3 -B -m pytest -q tests/sqlite`, build and install a wheel,
+  and run both examples from the installed package. Python 3.11+ is required.
+- Preserve the separate Runner and SQLite API/storage boundaries; no implicit migration.

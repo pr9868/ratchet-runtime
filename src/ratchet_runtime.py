@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
-__version__ = "0.5.0a2"
+__version__ = "0.6.0a1"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

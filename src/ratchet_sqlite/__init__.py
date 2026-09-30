@@ -1,0 +1,66 @@
+"""Ratchet SQLite public API."""
+
+from .backend import SQLiteRatchet
+from .comparators import Comparator, ComparatorRegistry
+from .errors import (
+    AlreadyCommitted,
+    AttemptConflict,
+    BundleRejected,
+    CheckpointConflict,
+    CohortIncomplete,
+    EffectConflict,
+    FenceRejected,
+    InstanceNotFound,
+    LeaseBusy,
+    PositionRegression,
+    RatchetError,
+    ReadbackRequired,
+    ReadOnlyRatchetError,
+    UnknownComparator,
+)
+from .models import (
+    ActiveSnapshot,
+    AttemptHandle,
+    AttemptSummary,
+    CheckpointRecord,
+    CommittedPosition,
+    EffectIntent,
+    EffectRecovery,
+    InstanceStatus,
+    Lease,
+    RecoveryStatus,
+)
+from .tiers import checkpoint_is_enabled, effective_checkpoint_tier, tier_rank
+
+__all__ = [
+    "ActiveSnapshot",
+    "AlreadyCommitted",
+    "AttemptConflict",
+    "AttemptHandle",
+    "AttemptSummary",
+    "BundleRejected",
+    "CheckpointConflict",
+    "CheckpointRecord",
+    "CohortIncomplete",
+    "CommittedPosition",
+    "Comparator",
+    "ComparatorRegistry",
+    "EffectConflict",
+    "EffectIntent",
+    "EffectRecovery",
+    "FenceRejected",
+    "InstanceNotFound",
+    "InstanceStatus",
+    "Lease",
+    "LeaseBusy",
+    "PositionRegression",
+    "RatchetError",
+    "ReadbackRequired",
+    "ReadOnlyRatchetError",
+    "RecoveryStatus",
+    "SQLiteRatchet",
+    "UnknownComparator",
+    "checkpoint_is_enabled",
+    "effective_checkpoint_tier",
+    "tier_rank",
+]

@@ -1,0 +1,4 @@
+{
+  "description": "Execution safety for local agent workflows: verified steps, fenced ownership, recoverable effects, and transactional SQLite commits. Experimental Python reference implementation.",
+  "topics": ["python", "ai-agents", "workflow", "fault-tolerance", "idempotency", "sqlite", "fencing", "recovery"]
+}
