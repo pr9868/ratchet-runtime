@@ -118,3 +118,10 @@ coordinator with a service that provides linearizable compare-and-set and leases
 same fencing and effect-integrity contract.
 
 The evaluated alternatives and consequences are recorded in [`ADR-001.md`](ADR-001.md).
+
+## Additive transactional API (0.6.0a1)
+
+`ratchet_sqlite` owns local SQLite leases, attempts, effects, position proposals,
+certification and activation. `ratchet_sqlite.contracts` owns only generic typed
+execution values. Neither imports the legacy Runner nor any application framework.
+The APIs use separate storage and require an explicit consumer choice. See [SQLite](SQLITE.md).

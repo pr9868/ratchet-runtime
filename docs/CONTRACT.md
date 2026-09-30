@@ -1,7 +1,11 @@
 # The Ratchet Runtime Contract
 
-**Version:** 0.5.0-alpha.2
+**Version:** 0.6.0-alpha.1
 **Status:** public alpha and executable reference contract
+
+The G1–G6 sections below describe the preserved `ratchet_runtime.Runner` API.
+The additive `ratchet_sqlite` API has a separate [SQLite contract](SQLITE.md): it
+accepts caller-produced proofs and does not execute workflow steps or heartbeats.
 
 ## Scope
 
