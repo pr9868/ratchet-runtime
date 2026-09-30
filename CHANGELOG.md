@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.0a1 — 2026-09-29 (local candidate)
+## 0.6.0a1 — 2026-09-29 (experimental prerelease)
 
 - Added the domain-neutral `ratchet_sqlite` API: transactional leases and fencing,
   immutable attempts, monotonic positions, checkpoints, effect recovery, atomic
