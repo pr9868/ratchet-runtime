@@ -1,6 +1,6 @@
-# Local validation — 2026-09-29
+# Validation — 2026-09-29
 
-Candidate: **0.6.0a1**. Local macOS arm64, Python 3.11.
+Version: **0.6.0a1**. Local macOS arm64, Python 3.11.
 
 | Check | Result |
 |---|---|
@@ -23,8 +23,8 @@ The carried-forward legacy suite remains unchanged. Public-only hardening adds
 failed/gated/abandoned outcome rejection, exact replay policy/outcome checks and
 non-string canonical-key rejection. Source lineage is recorded separately.
 
-Linux/Python 3.11, 3.12 and 3.13 CI is configured but has **not run on GitHub for
-this candidate**. Real power-loss, live provider behavior, distributed storage and
+Linux/Python 3.11, 3.12 and 3.13 [GitHub CI passed](https://github.com/pr9868/ratchet-runtime/actions/runs/36664854153)
+for the implementation merged in [PR #1](https://github.com/pr9868/ratchet-runtime/pull/1). Real power-loss, live provider behavior, distributed storage and
 production suitability are not established. Test counts describe local execution,
 not publication or release approval.
 
@@ -39,5 +39,7 @@ The expanded landing page was checked for balanced code fences and valid local
 file/section links. Its Python examples ran successfully against installed packages
 in a temporary workspace. Anchor's documented legacy-helper init/validate/plan
 sequence also passed in a fresh project. GitHub About metadata was checked for
-field length and topic syntax. Mermaid diagrams still require GitHub rendering
-review during publication. Runtime code and the recorded test suites are unchanged.
+field length and topic syntax and applied to the public repository. Both Mermaid
+diagrams rendered on GitHub, and every README section anchor resolved. The source
+and built archives passed a separate scan for private imports, owner paths and
+credential patterns. Runtime behavior and the recorded test suites are unchanged.

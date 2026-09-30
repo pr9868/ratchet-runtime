@@ -7,7 +7,7 @@ Python callback: ownership, verification, progress tracking, external-effect
 recovery, and durable completion. It helps a host answer a concrete question:
 **after a failure or restart, what actually completed, and what is safe to do next?**
 
-> **Status: 0.6.0a1 — local public alpha candidate.** Educational reference
+> **Status: 0.6.0a1 — public experimental alpha.** Educational reference
 > implementation for learning and local experiments. The new SQLite API is opt-in;
 > the original Runner API remains available. Python 3.11+, local Linux/macOS
 > storage, MIT license. See [validation evidence](docs/VALIDATION.md) and
@@ -58,11 +58,11 @@ users must upgrade Python or remain on 0.5.x.
 
 ## Quick start
 
-From a checkout containing this candidate, create an isolated environment. Neither
+Create an isolated environment from the versioned source checkout. Neither
 API needs third-party runtime packages.
 
 ```bash
-git clone https://github.com/pr9868/ratchet-runtime.git
+git clone --branch v0.6.0a1 https://github.com/pr9868/ratchet-runtime.git
 cd ratchet-runtime
 python3.11 -m venv .venv
 source .venv/bin/activate
@@ -77,8 +77,9 @@ The SQLite example demonstrates a synthetic commit, exact replay, position
 advancement, certificate-chain inspection and read-only access. Both use temporary
 folders and require no provider credentials or model access.
 
-Until this candidate is published, cloning the current GitHub default branch may
-return the preceding version. Check `VERSION` before following the SQLite example.
+Download the wheel or source archive from the [0.6.0a1 GitHub prerelease](https://github.com/pr9868/ratchet-runtime/releases/tag/v0.6.0a1).
+The release includes SHA-256 checksums. This version is distributed through GitHub;
+these instructions do not depend on a package-index release.
 
 ### A minimal Runner workflow
 
@@ -226,11 +227,11 @@ python scripts/check_release.py
 python -m build
 ```
 
-Local validation for this candidate recorded **63/63 Runner checks and 37 SQLite
+Local validation recorded **63/63 Runner checks and 37 SQLite
 tests passing**. Coverage includes competing processes, stale fencing, SIGKILL
 boundaries, source-preserving inspection, immutable bundles and replay, position
-monotonicity and certificate chains. The configured Linux/Python 3.11–3.13 GitHub
-matrix has not yet run for this candidate. See [validation](docs/VALIDATION.md).
+monotonicity and certificate chains. The Linux/Python 3.11–3.13 [GitHub CI matrix](https://github.com/pr9868/ratchet-runtime/actions/runs/36664854153)
+also passed. See [validation](docs/VALIDATION.md).
 
 For a bug report, include the API used, Python/OS versions, a small synthetic
 reproduction and the observed recovery state. Remove credentials and private data.
@@ -249,6 +250,6 @@ together. [Contributing](CONTRIBUTING.md) covers packaging and example checks;
 | [Initial review](docs/REVIEW-001.md) and [recovery review](docs/REVIEW-002.md) | Earlier defects and the reasoning behind their fixes |
 | [Examples](examples) | Executable synthetic recovery and commit demonstrations |
 | [Changelog](CHANGELOG.md) | Versions and compatibility changes |
-| [Validation](docs/VALIDATION.md) | Evidence and limits of the current candidate |
+| [Validation](docs/VALIDATION.md) | Evidence and limits of this version |
 
 Licensed under [MIT](LICENSE).
